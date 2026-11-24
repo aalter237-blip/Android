@@ -1,0 +1,85 @@
+name: Ubuntu Linux Desktop & SSH
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'مدة تشغيل السيرفر بالساعات (1 إلى 6)'
+        required: true
+        default: '3'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '6'
+
+jobs:
+  ubuntu-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Update System & Install XFCE + XRDP + Apps
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xfce4 xfce4-goodies xrdp dbus-x11 xorgxrdp \
+            openssh-server curl wget git nano htop unzip python3-pip
+
+      - name: Create User & Fix XFCE Session
+        run: |
+          sudo useradd -m -s /bin/bash ss
+          echo "ss:1234" | sudo chpasswd
+          sudo usermod -aG sudo,ssl-cert,users,video,render ss
+
+          sudo mkdir -p /run/dbus
+          sudo chown messagebus:messagebus /run/dbus || true
+          sudo systemctl restart dbus || sudo service dbus restart || true
+
+          cat << 'EOF' | sudo tee /home/ss/.xsession
+          #!/bin/sh
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+          exec dbus-run-session -- startxfce4
+          EOF
+
+          sudo tee /etc/xrdp/startwm.sh << 'EOF'
+          #!/bin/sh
+          if [ -r /etc/default/locale ]; then
+            . /etc/default/locale
+            export LANG LANGUAGE
+          fi
+          export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_DATA_DIRS=/usr/local/share:/usr/share
+          exec dbus-run-session -- startxfce4
+          EOF
+
+          sudo chown -R ss:ss /home/ss
+          sudo chmod +x /home/ss/.xsession /etc/xrdp/startwm.sh
+          sudo sed -i 's/max_bpp=32/max_bpp=16/g' /etc/xrdp/xrdp.ini
+
+          sudo systemctl enable xrdp ssh
+          sudo systemctl restart xrdp ssh
+
+      - name: Install & Connect Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey="${TS_AUTHKEY}" --hostname=gh-ubuntu-linux
+          sleep 3
+          IP=$(tailscale ip -4)
+          echo "========================================="
+          echo "Ubuntu IP Address : $IP"
+          echo "Username          : ss"
+          echo "Password          : 1234"
+          echo "========================================="
+
+      - name: Keep Session Alive (Timed)
+        run: |
+          HOURS=${{ github.event.inputs.duration_hours }}
+          SECONDS_TO_RUN=$((HOURS * 3600))
+          echo "السيرفر سيعمل لمدة $HOURS ساعات..."
+          sleep $SECONDS_TO_RUN
